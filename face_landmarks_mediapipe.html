@@ -1,0 +1,142 @@
+# 1) Create the working MediaPipe HTML file in the current folder
+$html = @'
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>MediaPipe FaceMesh (browser) — lightweight</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { margin:0; font-family: Arial, Helvetica, sans-serif; background:#111; color:#ddd; }
+    #wrap { display:flex; gap:12px; padding:12px; align-items:flex-start; }
+    canvas { background:#000; border-radius:6px; }
+    #info { width:320px; }
+    h1 { font-size:18px; margin:0 0 6px 0; }
+    p { margin:6px 0; color:#cfcfcf; }
+    .dot { width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:8px; }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div>
+      <video id="video" autoplay playsinline style="display:none"></video>
+      <canvas id="canvas" width="640" height="480"></canvas>
+    </div>
+    <div id="info">
+      <h1>FaceMesh — MediaPipe JS</h1>
+      <p id="status">Loading MediaPipe FaceMesh...</p>
+      <p><span class="dot" style="background:lime"></span> Green dots = iris centers</p>
+      <p>Use Chrome/Edge for best performance. Allow camera when prompted.</p>
+      <p id="tips" style="color:#ffdd88"></p>
+    </div>
+  </div>
+
+  <!-- MediaPipe FaceMesh + Camera utils + Drawing utils -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const status = document.getElementById('status');
+    const tips = document.getElementById('tips');
+
+    // Iris landmark indices in MediaPipe FaceMesh (refined)
+    const LEFT_IRIS_IDX = [474,475,476,477];
+    const RIGHT_IRIS_IDX = [469,470,471,472];
+
+    // Options
+    const MAX_FACES = 1;
+    const WIDTH = canvas.width;
+    const HEIGHT = canvas.height;
+
+    // Create FaceMesh instance
+    const faceMesh = new FaceMesh({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+    });
+
+    faceMesh.setOptions({
+      maxNumFaces: MAX_FACES,
+      refineLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+
+    faceMesh.onResults(onResults);
+
+    // MediaPipe camera helper (uses requestAnimationFrame internally)
+    const camera = new Camera(video, {
+      onFrame: async () => {
+        await faceMesh.send({image: video});
+      },
+      width: WIDTH,
+      height: HEIGHT
+    });
+
+    async function startCamera() {
+      try {
+        await camera.start();
+        status.innerText = 'Camera started — looking for face...';
+      } catch (e) {
+        status.innerText = 'Camera error: ' + e.message;
+        console.error(e);
+        tips.innerText = 'If camera permission denied, click the lock icon in the address bar and allow camera for this site.';
+      }
+    }
+
+    function drawIrisCenters(mesh) {
+      // mesh is array of [x,y,z] in pixel coords
+      function meanPt(idxs) {
+        let sx=0, sy=0;
+        for (let i=0;i<idxs.length;i++){ const p = mesh[idxs[i]]; sx+=p.x; sy+=p.y; }
+        return {x: sx/idxs.length, y: sy/idxs.length};
+      }
+      const L = meanPt(LEFT_IRIS_IDX);
+      const R = meanPt(RIGHT_IRIS_IDX);
+      ctx.fillStyle = 'lime';
+      ctx.beginPath(); ctx.arc(L.x, L.y, 4, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(R.x, R.y, 4, 0, Math.PI*2); ctx.fill();
+    }
+
+    function onResults(results) {
+      // clear
+      ctx.save();
+      ctx.clearRect(0,0,canvas.width, canvas.height);
+      // draw camera image as background
+      ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+
+      if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) {
+        status.innerText = 'No face detected';
+        ctx.restore();
+        return;
+      }
+
+      status.innerText = 'Face detected';
+      // for each face (we use first)
+      const landmarks = results.multiFaceLandmarks[0];
+
+      // draw lightweight contours
+      window.drawConnectors(ctx, landmarks, window.FACEMESH_CONTOURS, {color: '#888', lineWidth: 1});
+
+      // convert normalized landmarks to pixel coords
+      const meshPts = landmarks.map(l => ({x: l.x * canvas.width, y: l.y * canvas.height, z: l.z}));
+      drawIrisCenters(meshPts);
+
+      ctx.restore();
+    }
+
+    // Start everything
+    status.innerText = 'Initializing camera...';
+    startCamera();
+  </script>
+</body>
+</html>
+'@
+
+Set-Content -Path .\face_landmarks_mediapipe.html -Value $html -Encoding UTF8
+
+# 2) Confirm file exists, then open it in your browser
+Get-ChildItem -Name | Select-String "face_landmarks_mediapipe.html"
+Start-Process "http://127.0.0.1:8000/face_landmarks_mediapipe.html"

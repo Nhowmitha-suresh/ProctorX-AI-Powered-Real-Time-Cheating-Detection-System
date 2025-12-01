@@ -1,0 +1,516 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Proctor v3.1 — Ultra-Reliable Real-Time Detection (Fixed)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { margin:0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:#0b0b0b; color:#eee; }
+    #wrap { display:flex; gap:25px; padding:25px; align-items:flex-start; }
+    #video-wrap { position: relative; box-shadow: 0 4px 12px rgba(0,0,0,0.5); border-radius: 10px; overflow:hidden; }
+    canvas { border-radius:10px; background:#000; display:block; }
+    #hud {
+      position:absolute; left:15px; top:15px;
+      font-size: 1.2em; font-weight:bold;
+      text-shadow:0 0 8px #000;
+      transition: color 0.3s;
+      background: rgba(0,0,0,0.35);
+      padding:6px 10px;
+      border-radius:6px;
+    }
+    #info { width:380px; display: flex; flex-direction: column; }
+    h2 { margin-top: 0; border-bottom: 2px solid #333; padding-bottom: 10px; }
+    .badge {
+      display:block; padding:10px; border-radius:8px; margin-bottom:15px;
+      background:#222; color:#ddd; font-size: 0.9em; line-height: 1.4;
+    }
+    #status { font-weight: 600; padding: 5px 0; color: #7fffd4; transition: color 0.3s; }
+    .controls { margin-bottom: 20px; }
+    .controls button {
+      padding:10px 18px; margin-right:8px; border:none; border-radius:5px;
+      background:#007bff; color:white; font-weight: bold; cursor: pointer; transition: background 0.2s;
+    }
+    .controls button:hover:not(:disabled) { background:#0056b3; }
+    .controls button:disabled { opacity: 0.45; cursor: default; background: #555; }
+    #events {
+      flex-grow: 1;
+      max-height: 350px;
+      overflow-y: auto;
+      font-size:12px;
+      color:#ccc;
+      background:#111;
+      padding:10px;
+      border-radius:6px;
+      border: 1px solid #333;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="video-wrap">
+      <canvas id="canvas" width="640" height="480"></canvas>
+      <div id="hud">SCORE: <span id="score">0.0</span></div>
+    </div>
+    <div id="info">
+      <h2>Proctor v3.1: Ultra-Reliable Monitoring</h2>
+      <div class="badge">
+        <strong>Mode:</strong> Immediate Scoring & Fast Decay<br>
+        <strong>Goal:</strong> High Accuracy, Low False Positives
+      </div>
+      <p><strong id="status">System Ready. Click Start.</strong></p>
+      <p>Note: Use Chrome/Edge, grant camera/mic access.</p>
+      <div class="controls">
+        <button id="startBtn">Start Monitoring</button>
+        <button id="stopBtn" disabled>Stop</button>
+        <button id="resetBtn">Reset Score</button>
+      </div>
+
+      <h3>Incident Log:</h3>
+      <div id="events">System Initialized.</div>
+    </div>
+  </div>
+
+  <!-- MediaPipe (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+
+<script>
+/* ======= CONFIG ======= */
+const CAM_W = 640, CAM_H = 480;
+const PROCESS_EVERY_N = 3;
+const MAX_SCORE = 100.0;
+const SCORE_DECAY_RATE = 0.92;
+const SCORE_INCREMENT = 1.0;
+
+// thresholds (normalized coordinate space)
+const GLANCE_THRESHOLD = 0.20;
+const HEAD_TURN_THRESHOLD = 0.25;
+const EXTREME_TURN_THRESHOLD = 0.45;
+const MOUTH_OPEN_RATIO = 0.25;
+const HAND_FACE_OVERLAP_THRESHOLD = 0.20;
+const HAND_NEAR_DISTANCE_RATIO = 0.5;
+
+// event weights
+const W_GLANCE = 0.8;
+const W_HEAD_TURN = 1.5;
+const W_EXTREME_TURN = 4.0;
+const W_MOUTH_OPEN = 1.0;
+const W_HAND_OVERLAP = 2.5;
+const W_HAND_NEAR = 1.8;
+const W_OTHERVOICE = 3.0;
+const W_FACE_GONE_IMMEDIATE = 20.0;
+
+// alarm levels
+const ALARM_LOW = 10.0;
+const ALARM_MEDIUM = 20.0;
+const ALARM_HIGH = 35.0;
+
+/* ======= UI & STATE ======= */
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const eventsEl = document.getElementById('events');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const resetBtn = document.getElementById('resetBtn');
+const scoreEl = document.getElementById('score');
+
+canvas.width = CAM_W; canvas.height = CAM_H;
+
+const LEFT_IRIS_IDX = [474,475,476,477];
+const RIGHT_IRIS_IDX = [469,470,471,472];
+
+/* ======= SCORING & LOG ======= */
+let current_score = 0.0;
+let lastAlarmTime = 0;
+const ALARM_COOLDOWN = 3.0;
+
+function now() { return performance.now() / 1000; }
+
+function logEvent(text) {
+  const t = new Date().toLocaleTimeString();
+  eventsEl.innerText = `${t}  ${text}\n` + eventsEl.innerText;
+}
+
+function pushImmediateEvent(weightMultiplier, label) {
+  // add a single large increment and log (respect cooldown)
+  const nowt = now();
+  if (nowt - lastAlarmTime < ALARM_COOLDOWN * 0.6) return; // avoid rapid repeats
+  current_score += SCORE_INCREMENT * weightMultiplier * 3;
+  if (current_score > MAX_SCORE) current_score = MAX_SCORE;
+  updateScore();
+  logEvent(`CRITICAL: ${label} +${(SCORE_INCREMENT * weightMultiplier * 3).toFixed(1)}`);
+  lastAlarmTime = nowt;
+}
+
+function updateScore() {
+  const s = Math.min(current_score, MAX_SCORE);
+  scoreEl.textContent = s.toFixed(1);
+
+  let scoreColor = 'lime';
+  if (s >= ALARM_HIGH) scoreColor = '#ff4444';
+  else if (s >= ALARM_MEDIUM) scoreColor = '#ffcc00';
+
+  document.getElementById('hud').style.color = scoreColor;
+  handleAlarms(s);
+}
+
+function handleAlarms(score) {
+  const nowt = now();
+  if (score >= ALARM_HIGH) {
+    if (nowt - lastAlarmTime > ALARM_COOLDOWN) {
+      lastAlarmTime = nowt;
+      say('CRITICAL: Cheating detected. Session paused.');
+      beep(1500,500); setTimeout(()=>beep(1500,500),550);
+    }
+  } else if (score >= ALARM_MEDIUM) {
+    if (nowt - lastAlarmTime > ALARM_COOLDOWN) {
+      lastAlarmTime = nowt;
+      say('High suspicion. Please focus.');
+      beep(900,300); setTimeout(()=>beep(900,300),300);
+    }
+  }
+}
+
+/* ======= AUDIO & UTIL ======= */
+let audioCtx = null, analyser = null, audioData = null, micStream = null;
+
+async function startAudio() {
+  if(audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    const source = audioCtx.createMediaStreamSource(micStream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    source.connect(analyser);
+    audioData = new Float32Array(analyser.fftSize);
+    logEvent('Microphone stream started.');
+  } catch(e) {
+    statusEl.textContent = 'Mic Error: Check permissions.';
+    console.warn(e);
+  }
+}
+
+function stopAudio() {
+  try { if(micStream) micStream.getTracks) { micStream.getTracks().forEach(t=>t.stop()); } } catch(e){}
+  try { audioCtx && audioCtx.close(); } catch(e){}
+  audioCtx = analyser = micStream = null; audioData = null;
+}
+
+function getAudioRMS() {
+  if(!analyser || !audioData) return 0;
+  analyser.getFloatTimeDomainData(audioData);
+  let s=0;
+  for(let i=0;i<audioData.length;i++) s += audioData[i]*audioData[i];
+  return Math.sqrt(s / audioData.length);
+}
+
+function say(text) {
+  try {
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.0;
+    window.speechSynthesis.speak(u);
+  } catch(e){ console.warn(e); }
+}
+
+function beep(freq=900, len=200) {
+  try {
+    if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type='sine'; o.frequency.value = freq;
+    o.connect(g); g.connect(audioCtx.destination);
+    g.gain.value = 0.0001;
+    const t0 = audioCtx.currentTime;
+    g.gain.exponentialRampToValueAtTime(0.2, t0 + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + len/1000);
+    o.start(t0);
+    setTimeout(()=>{ try { o.stop(); o.disconnect(); g.disconnect(); } catch(e){} }, len+40);
+  } catch(e){ console.warn(e); }
+}
+
+/* ======= MEDIAPIPE ======= */
+let faceMesh = null, hands = null, camera = null;
+let lastFace = null, lastHands = null;
+
+function createFaceMesh() {
+  faceMesh = new FaceMesh({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}`});
+  faceMesh.setOptions({ maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+  faceMesh.onResults(r => { lastFace = r; });
+}
+
+function createHands() {
+  hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+  hands.setOptions({ maxNumHands: 2, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+  hands.onResults(r => { lastHands = r; });
+}
+
+function normalizedToPixels(landmarks) {
+  return landmarks.map(p => ({x: p.x * canvas.width, y: p.y * canvas.height, z: p.z || 0}));
+}
+
+/* ======= STATE & CONTROL ======= */
+let calibrated=false, calibrationSamples=[];
+const CALIBRATION_SAMPLE_COUNT = 30;
+let calibCenter = {x: 0.5, y: 0.5}, ema = {nx:0.5, ny:0.5};
+
+function resetAll() {
+  current_score = 0.0; updateScore();
+  calibrationSamples = []; calibrated=false;
+  calibCenter = {x:0.5, y:0.5}; ema = {nx:0.5, ny:0.5};
+  lastFace = null; lastHands = null;
+  faceGoneSince = null;
+  eventsEl.innerText = 'System Reset.\n';
+  logEvent('System reset initiated.');
+}
+
+/* ======= ANALYSIS LOOP ======= */
+let frameCount = 0;
+let running = false;
+let rafId = null;
+let faceGoneSince = null;
+
+function getIrisCenterFromLM(lm, indices) {
+  let sx=0, sy=0;
+  for(const i of indices){ sx += lm[i].x; sy += lm[i].y; }
+  return {x: sx / indices.length, y: sy / indices.length};
+}
+
+async function analyzeLoop() {
+  frameCount++;
+  ctx.clearRect(0,0,canvas.width, canvas.height);
+
+  // decay
+  current_score *= SCORE_DECAY_RATE;
+
+  // draw video image if available
+  const imageSource = (lastFace && lastFace.image) ? lastFace.image : (lastHands && lastHands.image) ? lastHands.image : null;
+  if(imageSource) ctx.drawImage(imageSource, 0, 0, canvas.width, canvas.height);
+  else { ctx.fillStyle='#000'; ctx.fillRect(0,0,canvas.width,canvas.height); }
+
+  if(frameCount % PROCESS_EVERY_N === 0) {
+    let faceDetected = false;
+    if(lastFace && lastFace.multiFaceLandmarks && lastFace.multiFaceLandmarks.length > 0) {
+      faceDetected = true;
+      const currentLM = lastFace.multiFaceLandmarks[0];
+      const mesh = normalizedToPixels(currentLM);
+
+      // iris centers (normalized)
+      const LcNorm = getIrisCenterFromLM(currentLM, LEFT_IRIS_IDX);
+      const RcNorm = getIrisCenterFromLM(currentLM, RIGHT_IRIS_IDX);
+      const nx = (LcNorm.x + RcNorm.x) / 2;
+      const ny = (LcNorm.y + RcNorm.y) / 2;
+
+      // calibration
+      if(!calibrated && calibrationSamples.length < CALIBRATION_SAMPLE_COUNT) {
+        calibrationSamples.push({x:nx, y:ny});
+        statusEl.textContent = `Calibrating... (${calibrationSamples.length}/${CALIBRATION_SAMPLE_COUNT})`;
+      } else if(!calibrated) {
+        let sx=0, sy=0; calibrationSamples.forEach(s=>{sx+=s.x; sy+=s.y});
+        calibCenter.x = sx / calibrationSamples.length; calibCenter.y = sy / calibrationSamples.length;
+        ema.nx = calibCenter.x; ema.ny = calibCenter.y; calibrated = true;
+        statusEl.textContent = 'Monitoring Active';
+        logEvent('Monitoring started.');
+      }
+
+      // smoothing + detection (only once calibrated)
+      if(calibrated) {
+        ema.nx = 0.35 * nx + 0.65 * ema.nx;
+        ema.ny = 0.35 * ny + 0.65 * ema.ny;
+
+        // gaze / glance
+        if(Math.abs(ema.nx - calibCenter.x) > GLANCE_THRESHOLD || Math.abs(ema.ny - calibCenter.y) > GLANCE_THRESHOLD) {
+          current_score += SCORE_INCREMENT * W_GLANCE;
+        }
+
+        // head-turn: nose offset from mid of outer landmarks
+        const leftOuter = mesh[33], rightOuter = mesh[263];
+        const midX = (leftOuter.x + rightOuter.x) / 2;
+        const nose = mesh[1];
+        const noseOffsetNorm = (nose.x - midX) / canvas.width;
+
+        if(Math.abs(noseOffsetNorm) >= EXTREME_TURN_THRESHOLD) {
+          pushImmediateEvent(W_EXTREME_TURN, 'Extreme Head Turn');
+        } else if(Math.abs(noseOffsetNorm) >= HEAD_TURN_THRESHOLD) {
+          current_score += SCORE_INCREMENT * W_HEAD_TURN;
+        }
+
+        // mouth open detection
+        let mouthOpen = 0;
+        try {
+          const top = mesh[13], bot = mesh[14], noseP = mesh[1], chin = mesh[152];
+          const faceH = Math.hypot(noseP.x - chin.x, noseP.y - chin.y) || 1;
+          mouthOpen = Math.hypot(top.x - bot.x, top.y - bot.y) / faceH;
+        } catch(e) { mouthOpen = 0; }
+        if(mouthOpen >= MOUTH_OPEN_RATIO) {
+          current_score += SCORE_INCREMENT * W_MOUTH_OPEN;
+        }
+
+        // draw face mesh connectors
+        window.drawConnectors(ctx, currentLM, window.FACEMESH_TESSELATION, {color: '#444', lineWidth: 1});
+        // draw irises
+        const Lc = {x: LcNorm.x * canvas.width, y: LcNorm.y * canvas.height};
+        const Rc = {x: RcNorm.x * canvas.width, y: RcNorm.y * canvas.height};
+        ctx.fillStyle = 'lime'; ctx.beginPath(); ctx.arc(Lc.x, Lc.y, 3, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(Rc.x, Rc.y, 3, 0, Math.PI*2); ctx.fill();
+
+        // face bbox & metrics (px)
+        let xs = mesh.map(p=>p.x), ys = mesh.map(p=>p.y);
+        const fx0 = Math.min(...xs), fy0 = Math.min(...ys), fx1 = Math.max(...xs), fy1 = Math.max(...ys);
+        const faceBoxPixels = {x0: fx0, y0: fy0, x1: fx1, y1: fy1};
+        const faceAreaPixels = Math.max(1, (fx1 - fx0) * (fy1 - fy0));
+        const faceCenter = {x: (fx0+fx1)/2, y: (fy0+fy1)/2};
+        const faceDiag = Math.hypot(fx1 - fx0, fy1 - fy0);
+
+        // HANDS checks
+        if(lastHands && lastHands.multiHandLandmarks && lastHands.multiHandLandmarks.length > 0) {
+          for(const h of lastHands.multiHandLandmarks) {
+            const hpts = h.map(p => ({x: p.x * canvas.width, y: p.y * canvas.height}));
+            const hx0 = Math.min(...hpts.map(p=>p.x)), hy0 = Math.min(...hpts.map(p=>p.y));
+            const hx1 = Math.max(...hpts.map(p=>p.x)), hy1 = Math.max(...hpts.map(p=>p.y));
+
+            // overlap intersection corrected
+            const ix0 = Math.max(hx0, faceBoxPixels.x0), iy0 = Math.max(hy0, faceBoxPixels.y0);
+            const ix1 = Math.min(hx1, faceBoxPixels.x1), iy1 = Math.min(hy1, faceBoxPixels.y1);
+            const interArea = Math.max(0, ix1 - ix0) * Math.max(0, iy1 - iy0);
+            const overlapFracCorrect = interArea / faceAreaPixels;
+
+            const handCenter = {x:(hx0+hx1)/2, y:(hy0+hy1)/2};
+            const dist = Math.hypot(handCenter.x - faceCenter.x, handCenter.y - faceCenter.y);
+
+            if(overlapFracCorrect >= HAND_FACE_OVERLAP_THRESHOLD) {
+              current_score += SCORE_INCREMENT * W_HAND_OVERLAP;
+              ctx.strokeStyle = 'red';
+            } else if(dist <= HAND_NEAR_DISTANCE_RATIO * faceDiag) {
+              current_score += SCORE_INCREMENT * W_HAND_NEAR;
+              ctx.strokeStyle = 'yellow';
+            } else {
+              ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+            }
+            ctx.lineWidth = 2;
+            ctx.strokeRect(hx0, hy0, hx1 - hx0, hy1 - hy0);
+          }
+        }
+
+        // reset faceGone timer since face is visible
+        faceGoneSince = null;
+      } // end calibrated block
+    } else {
+      // NO face in this cycle: start a short timer before triggering immediate critical
+      if(!faceGoneSince) faceGoneSince = now();
+      const elapsed = now() - faceGoneSince;
+      // Only escalate to critical if missing for > 0.6s (to avoid single-frame drops)
+      if(elapsed > 0.6) {
+        pushImmediateEvent(W_FACE_GONE_IMMEDIATE, 'Face Not Visible');
+      }
+    }
+
+    // AUDIO correlation (voice other than user)
+    const rms = getAudioRMS();
+    // conservative threshold: noise floor around 0.005-0.02; pick 0.03 as you had originally but add margin
+    if(rms > 0.035) {
+      // add only if calibrated / monitoring started to reduce startup false triggers
+      if(calibrated) current_score += SCORE_INCREMENT * W_OTHERVOICE;
+    }
+
+    // clamp and update
+    current_score = Math.min(current_score, MAX_SCORE);
+    updateScore();
+  } // end processing frames
+
+  if(running) rafId = requestAnimationFrame(analyzeLoop);
+}
+
+/* ======= START / STOP ======= */
+let videoElement = null;
+
+async function startProctor() {
+  resetAll();
+  statusEl.textContent = 'Initializing media streams...';
+  startBtn.disabled = true; stopBtn.disabled = true;
+
+  try {
+    // audio
+    await startAudio();
+
+    // mediapipe
+    createFaceMesh(); createHands();
+    logEvent('MediaPipe models loaded.');
+
+    // video
+    videoElement = document.createElement('video');
+    videoElement.width = CAM_W; videoElement.height = CAM_H; videoElement.playsInline = true; videoElement.muted = true;
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: CAM_W, height: CAM_H }, audio: false });
+    videoElement.srcObject = stream;
+
+    statusEl.textContent = 'Waiting for video stream...';
+
+    await new Promise((resolve, reject) => {
+      videoElement.onloadedmetadata = () => {
+        videoElement.play().then(resolve).catch(reject);
+      };
+      // fallback
+      setTimeout(() => {
+        if(videoElement.readyState >= 2) resolve();
+      }, 600);
+      videoElement.load();
+    });
+    logEvent('Video stream active.');
+
+    // camera helper
+    camera = new Camera(videoElement, {
+      onFrame: async () => {
+        try {
+          await faceMesh.send({image: videoElement});
+          await hands.send({image: videoElement});
+        } catch(e) {
+          // swallow single-frame processing errors but log occasionally
+          console.warn('Frame processing error', e);
+        }
+      },
+      width: CAM_W, height: CAM_H
+    });
+    camera.start();
+
+    statusEl.textContent = 'Camera started — Calibrating (look straight)';
+    running = true;
+    analyzeLoop();
+
+    startBtn.disabled = true; stopBtn.disabled = false;
+    logEvent('Proctor engine started successfully.');
+  } catch(e) {
+    statusEl.textContent = `CRITICAL ERROR: ${e.name || e.message}. Check permissions, server, or camera use.`;
+    console.error(e);
+    startBtn.disabled = false; stopBtn.disabled = true;
+    // ensure cleanup
+    stopProctor();
+  }
+}
+
+function stopProctor() {
+  running = false;
+  try { if(camera) camera.stop(); } catch(e){}
+  if(videoElement && videoElement.srcObject) {
+    try { videoElement.srcObject.getTracks().forEach(track => track.stop()); } catch(e){}
+    videoElement.srcObject = null;
+  }
+  try { if(rafId) cancelAnimationFrame(rafId); } catch(e){}
+  stopAudio();
+  startBtn.disabled = false; stopBtn.disabled = true;
+  statusEl.textContent = 'Stopped. Ready to restart.';
+  logEvent('Proctor stopped.');
+}
+
+/* ======= BIND EVENTS ======= */
+startBtn.onclick = startProctor;
+stopBtn.onclick = stopProctor;
+resetBtn.onclick = function(){ current_score = 0.0; updateScore(); logEvent('Score reset manually.'); };
+
+</script>
+</body>
+</html>

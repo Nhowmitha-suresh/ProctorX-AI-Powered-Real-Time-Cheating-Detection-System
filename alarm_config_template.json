@@ -1,0 +1,185 @@
+{
+  "system": {
+    "version": "2.0",
+    "name": "Advanced Cheating Detection & Proctoring System",
+    "environment": "production"
+  },
+  
+  "alarm_thresholds": {
+    "description": "Score ranges for alarm levels (0-100 scale)",
+    "notice": 6.0,
+    "low": 15.0,
+    "medium": 25.0,
+    "high": 40.0,
+    "critical": 60.0
+  },
+  
+  "debounce_windows_seconds": {
+    "description": "Wait period before escalating to next level",
+    "notice": 0.4,
+    "low": 0.6,
+    "medium": 1.2,
+    "high": 0.8
+  },
+  
+  "cooldown_periods_seconds": {
+    "description": "Suppress repeated notifications for same level",
+    "low": 4.0,
+    "medium": 6.0,
+    "high": 12.0,
+    "critical": 30.0
+  },
+  
+  "detection_persistence": {
+    "phone_persist_frames": 5,
+    "phone_persist_time_seconds": 1.0,
+    "hand_persist_frames": 3,
+    "face_missing_warn_seconds": 0.6,
+    "face_missing_high_seconds": 2.0
+  },
+  
+  "evidence": {
+    "capture_policy": {
+      "notice": "none",
+      "low": "single_snapshot",
+      "medium": "snapshot_5s_clip",
+      "high": "2_snapshots_15s_clip",
+      "critical": "3_snapshots_30s_clip_audio"
+    },
+    "retention_days": 90,
+    "format": "PNG (lossless) + MP4 H.264",
+    "store_checksums": true
+  },
+  
+  "notifications": {
+    "webhook": {
+      "enabled": true,
+      "on_levels": ["medium", "high", "critical"],
+      "timeout_seconds": 5,
+      "retry_attempts": 3
+    },
+    "email": {
+      "enabled": true,
+      "on_levels": ["high", "critical"],
+      "smtp_server": "smtp.gmail.com",
+      "smtp_port": 587,
+      "from_address": "alerts@example.com",
+      "proctor_recipients": ["proctor@example.com"]
+    },
+    "sms": {
+      "enabled": true,
+      "on_levels": ["critical"],
+      "proctor_phone": "+1234567890"
+    },
+    "syslog": {
+      "enabled": false,
+      "server": "syslog.example.com",
+      "port": 514
+    }
+  },
+  
+  "corroboration": {
+    "required_for_medium_plus": true,
+    "description": "Require multi-modal agreement before escalating",
+    "minimum_modalities_for_critical": 2
+  },
+  
+  "exam_policy": {
+    "auto_pause_on_critical": false,
+    "auto_lock_exam": false,
+    "require_proctor_unlock": true,
+    "incident_requires_manual_review": true
+  },
+  
+  "composite_rules": {
+    "head_turn_plus_phone": "escalate_to_critical",
+    "head_turn_plus_phone_plus_audio": "escalate_to_critical",
+    "repeated_gaze_deviations_3_in_5s": "escalate_to_medium",
+    "face_missing_2_seconds": "escalate_to_high"
+  },
+  
+  "operator_workflow": {
+    "actions_available": [
+      "acknowledge",
+      "mark_false_positive",
+      "lock_exam",
+      "unlock_exam",
+      "request_live_view",
+      "request_student_response"
+    ],
+    "acknowledge_duration_minutes": 5,
+    "log_all_overrides": true
+  },
+  
+  "system_modes": {
+    "test_mode": false,
+    "verbose_logging": true,
+    "debug_corroboration": false,
+    "capture_all_frames": false
+  },
+  
+  "accessibility": {
+    "support_visual_captions": true,
+    "support_tts_alerts": true,
+    "keyboard_navigation": true,
+    "high_contrast_mode": true
+  },
+  
+  "privacy": {
+    "respect_gdpr": true,
+    "respect_ferpa": true,
+    "require_policy_for_third_party_sharing": true,
+    "signed_urls_ttl_minutes": 30,
+    "anonymize_logs_after_days": 180
+  },
+  
+  "performance": {
+    "target_fps": 30,
+    "max_memory_mb": 1024,
+    "max_latency_ms": 100,
+    "batch_evidence_cleanup_hours": 24
+  },
+  
+  "audit_trail": {
+    "enabled": true,
+    "log_format": "jsonl",
+    "include_device_metadata": true,
+    "include_session_metadata": true,
+    "include_operator_actions": true
+  },
+  
+  "detection_weights": {
+    "eye_gaze_deviation": 1,
+    "downward_gaze": 4,
+    "rapid_saccade": 3,
+    "head_turn_moderate": 2,
+    "head_turn_extreme": 5,
+    "face_missing": 10,
+    "hand_near_face": 2,
+    "hand_covering_face": 4,
+    "phone_detected": 20,
+    "earphone_detected": 10,
+    "notes_detected": 8,
+    "whispering": 10,
+    "external_voice": 8,
+    "lip_movement_no_audio": 5,
+    "background_change": 3,
+    "camera_obstruction": 15,
+    "suspicious_pattern": 12
+  },
+  
+  "scoring": {
+    "decay_rate_per_frame": 0.02,
+    "pattern_decay_time_seconds": 10,
+    "max_accumulated_score": 100
+  },
+  
+  "ui_dashboard": {
+    "resolution_width": 1920,
+    "resolution_height": 1440,
+    "update_frequency_hz": 30,
+    "show_timeline_graph": true,
+    "show_event_breakdown": true,
+    "show_statistics": true
+  }
+}

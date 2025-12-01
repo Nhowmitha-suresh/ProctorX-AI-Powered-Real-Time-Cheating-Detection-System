@@ -1,0 +1,50 @@
+@"
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv/
+venv/
+.env/
+mp_env/
+mp_env/**
+
+# Editor & OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Python packages caches
+*.egg-info/
+pip-wheel-metadata/
+build/
+dist/
+
+# Jupyter
+.ipynb_checkpoints
+
+# Logs
+log/
+logs/
+*.log
+
+# Models and big files
+model/
+models/
+*.pt
+*.pth
+*.onnx
+*.tflite
+
+# Git-LFS attributes
+.gitattributes
+
+# Windows specifics
+*.exe
+*.dll
+
+"@ > .gitignore
